@@ -1,0 +1,11 @@
+.vscode/
+.env
+.code-workspace
+__pycache__/
+
+dataset/*
+!dataset/.gitkeep
+model/*
+!model/.gitkeep
+result/*
+!result/.gitkeep
