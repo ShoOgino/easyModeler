@@ -1,13 +1,12 @@
-from src.Model.LinearLayered import LinearLayered
 import numpy
-import torch.nn as nn
 
 class Node():
+    isRoot = None
     isSequencial = None
     isPictual = None
     numOfElements = None
     classesChildren = []
-    columnUseless = []
+    columnsUseless = []
     all = []
     max = []
     sum = []
@@ -22,20 +21,42 @@ class Node():
         else:
             for index,child in enumerate(children):
                 self.children.append(self.classesChildren[index](child))
-    #valuesがint or floatなら計算。
-    #違うなら委譲
+    def removeColumnsUseless(self):
+        flag = False
+        for clsChild in self.classesChildren:
+            if(not clsChild in [int, float, numpy.float64]):
+                flag=True
+        if(flag):
+            for child in self.children:
+                child.removeColumnsUseless()
+        else:
+            for column in sorted(self.columnsUseless, reverse=True):
+                self.children.pop(column)
+            self.__class__.numOfElements = len(self.children)
     @classmethod
-    def identifyColumnUseless(cls):
-        cls.calcMax()
-        cls.calcSum()
-        for i in range(cls.numOfElements):
-            if(cls.max[i]==0 and cls.sum[i]==0):
-                cls.columnUseless.append(i)
+    def identifyColumnsUseless(cls):
+        flag = False
+        for clsChild in cls.classesChildren:
+            if(not clsChild in [int, float, numpy.float64]):
+                flag=True
+        if(flag):
+            for clsChild in cls.classesChildren:
+                clsChild.identifyColumnsUseless()
+        else:
+            cls.calcMax()
+            cls.calcSum()
+            for i in range(cls.numOfElements):
+                if(cls.max[i]==0 and cls.sum[i]==0):
+                    cls.columnsUseless.append(i)
+            for column in sorted(cls.columnsUseless, reverse=True):
+                for indexAll in range(len(cls.all)):
+                    cls.all[indexAll].pop(column)
+
     @classmethod
     def calcMax(cls):
         flag = False
         for classChild in cls.classesChildren:
-            if(not classChild in [int, float]):
+            if(not classChild in [int, float, numpy.float64]):
                 flag=True
         if(flag):
             for classChild in cls.classesChildren:
@@ -46,7 +67,7 @@ class Node():
     def calcSum(cls):
         flag = False
         for classChild in cls.classesChildren:
-            if(not classChild in [int, float]):
+            if(not classChild in [int, float, numpy.float64]):
                 flag=True
         if(flag):
             for classChild in cls.classesChildren:
@@ -57,7 +78,7 @@ class Node():
     def calcMean(cls):
         flag = False
         for classChild in cls.classesChildren:
-            if(not classChild in [int, float]):
+            if(not classChild in [int, float, numpy.float64]):
                 flag=True
         if(flag):
             for classChild in cls.classesChildren:
@@ -70,7 +91,7 @@ class Node():
     def calcStandard(cls):
         flag = False
         for classChild in cls.classesChildren:
-            if(not classChild in [int, float]):
+            if(not classChild in [int, float, numpy.float64]):
                 flag=True
         if(flag):
             for classChild in cls.classesChildren:
@@ -80,7 +101,7 @@ class Node():
     def standardize(self):
         flag = False
         for classChild in self.classesChildren:
-            if(not classChild in [int, float]):
+            if(not classChild in [int, float, numpy.float64]):
                 flag=True
         if(flag):
             for child in self.children:
@@ -91,7 +112,7 @@ class Node():
     def normelize(self):
         flag = False
         for classChild in self.classesChildren:
-            if(not classChild in [int, float]):
+            if(not classChild in [int, float, numpy.float64]):
                 flag=True
         if(flag):
             for child in self.children:
@@ -110,30 +131,3 @@ class Node():
                 else:
                     vector.append(child.toVector())
             return vector
-    def calcComponent(self, numOfInput):
-        numOfOutput = 0
-        if(self.isSequencial):
-            #LSTM
-            numOfLayers = 1
-            hidden_size = numOfInput//10,
-            component = nn.LSTM(
-                input_size = numOfInput,
-                hidden_size = hidden_size,
-                num_layers = numOfLayers,
-                batch_first = True,
-                dropout = 0,
-                bidirectional = True
-            )
-            numOfOutput += hidden_size*2
-        elif(self.isPictual):
-            pass
-        else:
-            #todo MyLinearクラスを作る。LSTMみたいに一つのコンポーネントで複数レイヤーを繋げられるようにする。
-            numOfLayers = 1
-            numOfOutput = numOfInput//10
-            component = LinearLayered(
-                in_features  = numOfInput,
-                out_features = numOfOutput,
-                numOfLayers  = numOfLayers
-            )
-        return component ,numOfOutput

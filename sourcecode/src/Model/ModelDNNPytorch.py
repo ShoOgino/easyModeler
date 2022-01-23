@@ -29,60 +29,67 @@ class ModelDNNPytorch(nn.Module):
         self.epochsEarlyStopping = config.epochs4EarlyStopping
         torch.backends.cudnn.enabled = True
         self.forward = None
-    def defineArchitecture(self):
-        self.component2component = {}
+        self.device = config.device or "cuda:0"
+    def defineArchitecture(self, trial=None, hp=None):
         self.components = nn.ModuleDict()
-        def createComponentsRecursively(node):
+        def createComponents(clsNode):
             numOfInput = 0
-            for index, child in enumerate(node.children):
-                if(len(node.classesChildren)==1):
-                    if(type(node.classesChildren[0]) in [int, float, numpy.float64]):
-                        numOfInput+=1
-                        continue
-                elif(1<len(node.classesChildren)):
-                    if(type(node.classesChildren[index]) in [int, float, numpy.float64]):
-                        numOfInput+=1
-                        continue
-                numOfInput += createComponentsRecursively(child)
-                self.component2component[type(child)] = type(node)
-            if(node.numOfElements!=1 or type(node) is config.classRecord):
-                component, numOfOutput = node.calcComponent(numOfInput)
-                self.components.add_module(type(node), component)
-                return numOfOutput
-            else:
-                return numOfInput
-        createComponentsRecursively(config.classRecord)
-        def forward(x):
-            def forwardInput(node):
-                input = []
-                for index, child in enumerate(node.children):
-                    if(len(node.classesChildren)==1):
-                        if(type(node.classesChildren[0]) in [int, float, numpy.float64]):
-                            continue
-                    elif(1<len(node.classesChildren)):
-                        if(type(node.classesChildren[index]) in [int, float, numpy.float64]):
-                            continue
-                    outputFromLayerPrevious = forwardInput(child)
-                    if(node.isSequential):
-                        input.append(outputFromLayerPrevious)
-                    else:
-                        input.extend(outputFromLayerPrevious)
-                if(node.numOfElements!=1 or (type(node) is config.classRecord)):
-                    return self.components[type(node)](input)
+            for index in range(clsNode.numOfElements):
+                clsChild = clsNode.classesChildren[max(index, len(clsNode.classesChildren)-1)]
+                if(issubclass(clsChild, Node)):
+                    numOfInput += createComponents(clsChild)
+                elif(clsChild in [int, float, numpy.float64]):#todo Nodeの子クラスとfloat値を共存させる
+                    numOfInput = clsNode.numOfElements
+                    break
                 else:
-                    return input
-            forwardInput(x)
+                    raise Exception("what type is the clschild?")
+            component, numOfOutput = clsNode.calcComponentPytorch(numOfInput, trial, hp)
+            self.components.add_module(clsNode.__name__, component)
+            return numOfOutput
+        createComponents(config.classRecord)
+        def forward(class2input):
+            #バッチに相当するtensorのlistが入った、辞書を引き数とする。
+            #で、そのバッチに相当するtensorのlistoを書くコンポーネントに入力する。
+            def forwardInput(clsNode):
+                if(not clsNode.__name__ in class2input):
+                    input = []
+                    for index in range(clsNode.numOfElements):
+                        clsChild = clsNode.classesChildren[max(index, len(clsNode.classesChildren)-1)]
+                        outputFromLayerPrevious = forwardInput(clsChild)
+                        if(clsNode.isSequential):
+                            input.extend(outputFromLayerPrevious)
+                        else:
+                            input.append(outputFromLayerPrevious)
+                    class2input[clsNode.__name__] = input[0]#todo
+                output = self.components[clsNode.__name__](class2input[clsNode.__name__])
+                if(clsNode.isSequential):
+                    _, (parametersBiLSTM, __) = output
+                    parametersBiLSTM = torch.cat(torch.split(parametersBiLSTM[(self.components[clsNode.__name__].num_layers-1)*2:], 1), dim=2)
+                    output = parametersBiLSTM.squeeze()
+                return output
+            return forwardInput(config.classRecord)
         self.forward = forward
         model = self.to(self.device)
-        return model
-    def defineOptimizer(self, hp, model):
-        nameOptimizer = hp["optimizer"]
-        if nameOptimizer == 'adam':
-            lrAdam = hp["lrAdam"]
-            beta_1Adam = hp["beta1Adam"]
-            beta_2Adam = hp["beta2Adam"]
-            epsilonAdam = hp["epsilonAdam"]
-            optimizer = torch.optim.Adam(model.parameters(), lr=lrAdam, betas=(beta_1Adam,beta_2Adam), eps=epsilonAdam)
+        return model.to(self.device)
+    def defineOptimizer(self, model, trial=None, hp=None):
+        if(hp!=None):
+            nameOptimizer = hp["optimizer"]
+            if nameOptimizer == 'adam':
+                lrAdam      = hp["lrAdam"]
+                beta1Adam  = hp["beta1Adam"]
+                beta2Adam  = hp["beta2Adam"]
+                epsilonAdam = hp["epsilonAdam"]
+            optimizer = torch.optim.Adam(model.parameters(), lr=lrAdam, betas=(beta1Adam,beta2Adam), eps=epsilonAdam)
+        elif(trial!=None):
+            nameOptimizer = trial.suggest_categorical('optimizer', ['adam'])
+            if nameOptimizer == 'adam':
+                lrAdam = trial.suggest_loguniform('lrAdam', 1e-6, 1e-4)
+                beta1Adam = trial.suggest_uniform('beta1Adam', 0.9, 0.9)
+                beta2Adam = trial.suggest_uniform('beta2Adam', 0.999, 0.999)
+                epsilonAdam = trial.suggest_loguniform('epsilonAdam', 1e-8, 1e-8)
+            optimizer = torch.optim.Adam(model.parameters(), lr=lrAdam, betas=(beta1Adam,beta2Adam), eps=epsilonAdam)
+        else:
+            raise Exception("no arguments")
         return optimizer
     def searchParameter(self, *, dataLoader, model, lossFunction, optimizer, numEpochs, isEarlyStopping):
         lossesTrain = []
@@ -102,18 +109,15 @@ class ModelDNNPytorch(nn.Module):
                 total=0
                 with tqdm(total=len(dataLoader[phase]),unit="batch") as pbar:
                     pbar.set_description(f"Epoch[{epoch}/{numEpochs}]({phase})")
-                    for ids, ys, xs in  dataLoader[phase]:
-                        ysPredicted = model(xs)
+                    for ids, ys, class2input in  dataLoader[phase]:
+                        ysPredicted = model(class2input)
                         ysPredicted = ysPredicted.squeeze()#もしysが1つしかなかったら、ベクトルじゃなくてスカラーに鳴ってしまう
                         ys = ys.squeeze()
-                        
                         loss=lossFunction(ysPredicted, ys)
-
                         if phase=="train":
                             optimizer.zero_grad()
                             loss.backward()
                             optimizer.step()
-
                         sig = nn.Sigmoid()
                         ysPredicted =  torch.round(sig(ysPredicted))
                         corrects+=int((ysPredicted==ys).sum())
@@ -179,229 +183,136 @@ class ModelDNNPytorch(nn.Module):
         fig.savefig(pathGraph)
         plt.clf()
         plt.close()
-    def build(self, listOfTrainValid, doHyperparametertuning):
-        def searchHyperParameter(datasets_Train_Valid):
-            def objectiveFunction(trial):
-                logger.info("trial " + str(trial.number) + "started")
-                listLossesValid=[]
-                listEpochs=[]
-                # prepare hyperparameter
-                hp = {
-                    "optimizer": trial.suggest_categorical('optimizer', ['adam']),
-                    "lrAdam": trial.suggest_loguniform('lrAdam', 1e-6, 1e-4),
-                    "beta1Adam": trial.suggest_uniform('beta1Adam', 0.9, 0.9), #trial.suggest_uniform('beta1Adam', 0.9, 1)
-                    "beta2Adam": trial.suggest_uniform('beta2Adam', 0.999, 0.999), #trial.suggest_uniform('beta2Adam', 0.999, 1)
-                    "epsilonAdam": trial.suggest_loguniform('epsilonAdam', 1e-8, 1e-8), #trial.suggest_loguniform('epsilonAdam', 1e-10, 1e-8)
-                    "sizeBatch": trial.suggest_int('sizeBatch', len(datasets_Train_Valid[0]["train"]) // 100, len(datasets_Train_Valid[0]["train"]) // 100)
-                }
-                if(config.checkASTExists()):
-                    pass
-                if(config.checkASTSeqExists()):
-                    hp["astseq_numOfLayers"] = trial.suggest_int('astseq_numOfLayers', 1, 3)
-                    hp["astseq_hiddenSize"] = trial.suggest_int('astseq_hiddenSize', 16, 256)
-                    hp["astseq_rateDropout"] = trial.suggest_uniform('astseq_rateDropout', 0.0, 0.0)#trial.suggest_uniform('astseq_rateDropout', 0.0, 0.3)
-                if(config.checkCommitGraphExists()):
-                    pass
-                if(config.checkCommitSeqExists()):
-                    hp["commitseq_numOfLayers"] = trial.suggest_int('commitseq_numOfLayers', 1, 3)
-                    hp["commitseq_hiddenSize"] = trial.suggest_int('commitseq_hiddenSize', 16, 256)
-                    hp["commitseq_rateDropout"] = trial.suggest_uniform('commitseq_rateDropout', 0.0, 0.0)#trial.suggest_uniform('rateDropout', 0.0, 0.3)
-                if(config.checkCodeMetricsExists()):
-                    hp["codemetrics_numOfLayers"] = trial.suggest_int('codemetrics_numOfLayers', 1, 3)
-                    hp["codemetrics_numOfOutput"] = trial.suggest_int('codemetrics_numOfOutput', 16, 128)
-                if(config.checkProcessMetricsExists()):
-                    hp["processmetrics_numOfLayers"] = trial.suggest_int('processmetrics_numOfLayers', 1, 3)
-                    hp["processmetrics_numOfOutput"] = trial.suggest_int('processmetrics_numOfOutput', 16, 128)
-                # prepare model architecture
-                model = self.defineNetwork(hp, datasets_Train_Valid[0]["train"])
-                # prepare loss function
-                lossFunction = nn.BCEWithLogitsLoss()
-                # prepare  optimizer
-                optimizer = self.defineOptimizer(hp, model)
-                for index4CrossValidation in range(len(datasets_Train_Valid)):
-                    logger.info("cross validation " + str(index4CrossValidation+1) + "/" + str(len(datasets_Train_Valid)))
-                    # prepare dataset
-                    dataset4Train = datasets_Train_Valid[index4CrossValidation]["train"]
-                    dataset4Valid = datasets_Train_Valid[index4CrossValidation]["valid"]
-                    dataloader={
-                        "train": DataLoader(
-                            dataset4Train,
-                            batch_size = hp['sizeBatch'],
-                            pin_memory=False,
-                            collate_fn = dataset4Train.collate_fn
-                        ),
-                        "valid": DataLoader(
-                            dataset4Valid,
-                            batch_size = hp['sizeBatch'],
-                            pin_memory=False,
-                            collate_fn= dataset4Valid.collate_fn
+    def build(self, doTraining, datalot4Train, doHyperparametertuning, doCrossValidation):
+        if(doTraining):
+            def searchHyperParameter(datalot4Train):
+                def objectiveFunction(trial):
+                    logger.info("trial " + str(trial.number) + "started")
+                    listLossesValid=[]
+                    listEpochs=[]
+                    model = self.defineArchitecture(trial=trial)
+                    lossFunction = nn.BCEWithLogitsLoss()
+                    optimizer = self.defineOptimizer(model, trial = trial)
+                    for index4CrossValidation in range(config.splitSize4CrossValidation):
+                        logger.info("cross validation " + str(index4CrossValidation+1) + "/" + str(config.splitSize4CrossValidation))
+                        dataset4train, dataset4valid = datalot4Train.createDatasets(config.splitSize4CrossValidation, index4CrossValidation, self.__class__, trial=trial, hp=None)
+                        dataloader={
+                            "train": DataLoader(
+                                dataset4train,
+                                batch_size = 100,
+                                collate_fn = dataset4train.collate
+                            ),
+                            "valid": DataLoader(
+                                dataset4valid,
+                                batch_size = 100,
+                                collate_fn= dataset4valid.collate
+                            )
+                        }
+                        epochBestValid, lossesTrain, lossesValid, accsTrain, accsValid = self.searchParameter(
+                            dataLoader = dataloader,
+                            model = model,
+                            lossFunction = lossFunction,
+                            optimizer = optimizer,
+                            numEpochs = 10000,
+                            isEarlyStopping=config.epochs4EarlyStopping
                         )
-                    }
-                    # build model
-                    self.initParameter()
-                    epochBestValid, lossesTrain, lossesValid, accsTrain, accsValid = self.searchParameter(
-                        dataLoader = dataloader,
-                        model = model,
-                        lossFunction = lossFunction,
-                        optimizer = optimizer,
-                        numEpochs = 10000,
-                        isEarlyStopping=config.epochs4EarlyStopping
+                        listLossesValid.append(lossesValid)
+                        listEpochs.append(epochBestValid)
+                        self.plotGraphTraining(lossesTrain, lossesValid, accsTrain, accsValid, "graphTrainToValid_" + str(trial.number) + "_" + str(index4CrossValidation))
+                        if(not doCrossValidation): break
+                    numEpochsBest=sum(listEpochs)//len(listEpochs)
+                    trial.set_user_attr("numEpochs", numEpochsBest)
+                    sumOfSquare=0
+                    for i,numEpochs in enumerate(listEpochs):
+                        temp = sum(listLossesValid[i][numEpochs:numEpochs+5])/5
+                        sumOfSquare += temp * temp
+                    logger.info(
+                        "trial " + str(trial.number) + " end" + "\n" +
+                        "value: " + str(sumOfSquare) + "\n"
                     )
-                    listLossesValid.append(lossesValid)
-                    listEpochs.append(epochBestValid)
-                    self.plotGraphTraining(lossesTrain, lossesValid, accsTrain, accsValid, "graphTrainToValid_" + str(trial.number) + "_" + str(index4CrossValidation))
-                numEpochsBest=sum(listEpochs)//len(listEpochs)
-                trial.set_user_attr("numEpochs", numEpochsBest)
-                sumOfSquare=0
-                for i,numEpochs in enumerate(listEpochs):
-                    temp = sum(listLossesValid[i][numEpochs:numEpochs+5])/5
-                    sumOfSquare += temp * temp
-                logger.info(
-                    "trial " + str(trial.number) + " end" + "\n" +
-                    "value: " + str(sumOfSquare) + "\n" +
-                    str(dict(**hp, **{"numEpochs":numEpochsBest})).replace("\'", "\"")
+                    return sumOfSquare
+                logger.info("hyperparameter search started")
+                config.pathDatabaseOptuna = config.pathDatabaseOptuna or config.pathDirOutput + "/optuna.db"
+                study = optuna.create_study(study_name="optuna", storage='sqlite:///'+config.pathDatabaseOptuna, load_if_exists=True)
+                study.optimize(objectiveFunction, timeout=config.period4HyperParameterSearch)
+                #save the hyperparameter that seems to be the best.
+                self.plotGraphHyperParameterSearch([v.value for v in study.trials])
+            if(doHyperparametertuning):
+                searchHyperParameter(datalot4Train)
+            logger.info("build Model")
+            hp = self.loadHyperparameter()
+            dataset4train, dataset4valid = datalot4Train.createDatasets(0, 0, self.__class__, hp=hp)
+            dataloader={
+                "train": DataLoader(
+                    dataset4train,
+                    batch_size = 100,
+                    collate_fn = dataset4train.collate
+                ),
+                "valid": DataLoader(
+                    dataset4valid,
+                    batch_size = 100,
+                    collate_fn = dataset4valid.collate
                 )
-                return sumOfSquare
-            logger.info("hyperparameter search started")
-            config.pathDatabaseOptuna = config.pathDatabaseOptuna or config.pathDirOutput + "/optuna.db"
-            study = optuna.create_study(study_name="optuna", storage='sqlite:///'+config.pathDatabaseOptuna, load_if_exists=True)
-            if(len(study.get_trials())==0):
-                hp_default = {
-                    "sizeBatch": len(datasets_Train_Valid[0]["train"])//100,
-                    "optimizer": "adam",
-                    "lrAdam": 1e-05,
-                    "beta1Adam": 0.9,
-                    "beta2Adam": 0.999,
-                    "epsilonAdam": 1e-08
-                }
-                if(config.checkCommitSeqExists()):
-                    hp_default_commitseq ={
-                        "commitseq_numOfLayers": 2,
-                        "commitseq_hiddenSize": 128,
-                        "commitseq_rateDropout": 0.0,
-                    }
-                    hp_default = dict(**hp_default, **hp_default_commitseq)
-                if(config.checkASTSeqExists()):
-                    hp_default_ASTSeq ={
-                        "astseq_numOfLayers": 2,
-                        "astseq_hiddenSize": 128,
-                        "astseq_rateDropout": 0.0,
-                    }
-                    hp_default = dict(**hp_default, **hp_default_ASTSeq)
-                if(config.checkCodeMetricsExists()):
-                    hp_default_CodeMetrics ={
-                        "codemetrics_numOfLayers": 2,
-                        "codemetrics_numOfOutput": 64,
-                    }
-                    hp_default = dict(**hp_default, **hp_default_CodeMetrics)
-                if(config.checkProcessMetricsExists()):
-                    hp_default_processmetrics = {
-                        "processmetrics_numOfLayers": 2,
-                        "processmetrics_numOfOutput": 64,
-                    }
-                    hp_default = dict(**hp_default, **hp_default_processmetrics)
-                study.enqueue_trial(hp_default)
-            study.optimize(objectiveFunction, timeout=config.period4HyperParameterSearch)
-            #save the hyperparameter that seems to be the best.
-            self.plotGraphHyperParameterSearch([v.value for v in study.trials])
-        if(doHyperparametertuning):
-            searchHyperParameter(listOfTrainValid)
-
-        logger.info("build Model")
-
-        hp = self.loadHyperparameter()
-
-        # prepare dataset
-        dataset4Train = listOfTrainValid["train"]
-        dataset4Test  = listOfTrainValid["test"]
-        dataloader={
-            "train": DataLoader(
-                dataset4Train,
-                batch_size = hp["sizeBatch"],
-                pin_memory=True,
-                collate_fn = dataset4Train.collate_fn
-            ),
-            "valid": DataLoader(
-                dataset4Test,
-                batch_size = hp["sizeBatch"],
-                pin_memory=True,
-                collate_fn = dataset4Test.collate_fn
+            }
+            model = self.defineArchitecture(hp = hp)
+            lossFunction = nn.BCEWithLogitsLoss()
+            optimizer = self.defineOptimizer(model, hp = hp)
+            _, lossesTrain, lossesValid, accsTrain, accsValid = self.searchParameter(
+                dataLoader = dataloader,
+                model = model,
+                lossFunction = lossFunction,
+                optimizer = optimizer,
+                numEpochs = hp["numEpochs"],
+                isEarlyStopping=False
             )
-        }
+            self.plotGraphTraining(lossesTrain, lossesValid, accsTrain, accsValid, "graphTrainToTest")
 
-        # prepare network architecture
-        model = self.defineNetwork(hp, dataset4Train)
+            config.pathModel = os.path.join(config.pathDirOutput, "parameters")
+            torch.save(model.state_dict(), config.pathModel)
+        else:
+            pass
 
-        # prepare loss function
-        lossFunction = nn.BCEWithLogitsLoss()
-
-        # prepare  optimizer
-        optimizer = self.defineOptimizer(hp, model)
-
-        # prepare model parameters
-        _, lossesTrain, lossesValid, accsTrain, accsValid = self.searchParameter(
-            dataLoader = dataloader,
-            model = model,
-            lossFunction = lossFunction,
-            optimizer = optimizer,
-            numEpochs = hp["numEpochs"],
-            isEarlyStopping=False
-        )
-        self.plotGraphTraining(lossesTrain, lossesValid, accsTrain, accsValid, "graphTrainToTest")
-
-        config.pathParameters = os.path.join(config.pathDirOutput, "parameters")
-        torch.save(model.state_dict(), config.pathParameters)
-    def test(self, dataset4Test):
+    def test(self, datalot4Test):
         logger.info("test model")
-
-        # get hyperparameter
         hp = self.loadHyperparameter()
-
-        # get dataset
+        dataset4test, dataset4test = datalot4Test.createDatasets(0, 0, self.__class__, hp=hp)
         dataloader={
             "test": DataLoader(
-                dataset4Test,
-                batch_size = hp["sizeBatch"],
-                pin_memory=False,
-                collate_fn = dataset4Test.collate_fn
+                dataset4test,
+                batch_size = 100,
+                collate_fn = dataset4test.collate
             )
         }
+        model = self.defineArchitecture(hp=hp)
+        model.load_state_dict(torch.load(config.pathModel))
+        model.eval()
 
-        # define network architecture
-        model = self.defineNetwork(hp, dataset4Test)
-
-        # build model
-        paramaters = torch.load(config.pathParameters)
-        model.load_state_dict(paramaters)
-        model = model.eval()
-
-        # predict ys
         ids = []
         ysPredicted = []
-        ysTest = []
-        for idsTemp, ys, xs in dataloader['test']:
+        ys = []
+        for idsTemp, ysTemp, class2input in dataloader['test']:
             ids += idsTemp
-            ysTest += [l for l in ys.to("cpu").squeeze().tolist()]
+            ys += [l for l in ysTemp.to("cpu").squeeze().tolist()]
             with torch.no_grad():
-                ysPredictedTemp = model(xs)
+                ysPredictedTemp = model(class2input)
                 sig = nn.Sigmoid()
                 ysPredictedTemp = sig(ysPredictedTemp)
                 ysPredicted += [l for l in ysPredictedTemp.to("cpu").squeeze().tolist()]
 
 
         # output prediction result
-        resultTest = np.stack((ids, ysTest, ysPredicted), axis=1)
+        resultTest = np.stack((ids, ys, ysPredicted), axis=1)
         with open(config.pathDirOutput+"/prediction.csv", 'w', newline="") as file:
             csv.writer(file).writerows(resultTest)
 
-        # output recall, precision, f-measure, AUC
+        # output recall, praazdlfecision, f-measure, AUC
         ysPredicted = np.round(ysPredicted, 0)
-        report = classification_report(ysTest, ysPredicted, output_dict=True)
-        report["AUC"] = roc_auc_score(ysTest, ysPredicted)
+        report = classification_report(ys, ysPredicted, output_dict=True)
+        report["AUC"] = roc_auc_score(ys, ysPredicted)
         with open(config.pathDirOutput+"/report.json", 'w') as file:
             json.dump(report, file, indent=4)
 
         # output confusion matrics
-        cm = confusion_matrix(ysTest, ysPredicted)
+        cm = confusion_matrix(ys, ysPredicted)
         sns.heatmap(cm, annot=True, cmap='Blues')
         plt.savefig(config.pathDirOutput+"/ConfusionMatrix.png")

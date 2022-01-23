@@ -35,7 +35,7 @@ if __name__ == '__main__':
     from src.Dataset.DatasetGiger import DatasetGiger
     from src.Model.ModelRF import ModelRF
     from src.Node.RecordGiger import RecordGiger
-    config.classDataset = DatasetGiger
+    config.classDatalot = DatasetGiger
     config.classRecord = RecordGiger
     config.classModel = ModelRF
     experiment = Experiment()

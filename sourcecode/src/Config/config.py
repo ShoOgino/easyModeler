@@ -3,7 +3,7 @@ from multiprocessing import Pool
 from multiprocessing import Process
 
 class config():
-    classDataset = None
+    classDatalot = None
     classRecord = None
     classModel = None
     # general
@@ -16,7 +16,6 @@ class config():
     pathsDirSampleTest = None
     # build model 
     device = None
-    algorithm = None
     epochs4EarlyStopping = None
     # tune hyperparameter
     isCrossValidation = None

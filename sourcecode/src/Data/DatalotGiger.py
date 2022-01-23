@@ -1,5 +1,5 @@
 from random import sample
-from src.Dataset.Dataset import Dataset
+from src.Dataset.Datalot import Datalot
 
 import json
 import os
@@ -8,7 +8,7 @@ import glob
 from src.Config.config import config
 
 
-class DatasetGiger(Dataset):
+class DatalotGiger(Datalot):
     def __init__(self, pathsRecord):
         super().__init__()
         self.pathsRecord = []

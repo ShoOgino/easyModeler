@@ -7,8 +7,8 @@ import os
 
 class Experiment():
     def __init__(self):
-        self.dataset4Train = None
-        self.dataset4Test = None
+        self.datalot4train = None
+        self.datalot4test = None
         self.model = None
 
     def run(self):
@@ -21,25 +21,24 @@ class Experiment():
             shutil.copy(config.pathDatabaseOptuna, config.pathDirOutput)
 
         self.buildDataset()
-        self.buildModel(config.splitSize4CrossValidation)
+        self.buildModel()
         self.testModel()
 
 
     def buildDataset(self):
-        self.dataset4Train = config.classDataset(config.pathsDirSampleTrain)
-        self.dataset4Test  = config.classDataset(config.pathsDirSampleTest)
+        self.datalot4train = config.classDatalot(config.pathsDirSampleTrain, isTest=False)
+        self.datalot4test  = config.classDatalot(config.pathsDirSampleTest, isTest=True)
 
-    def buildModel(self, numOfFolds):
+    def buildModel(self):
         self.model = config.classModel()
         self.model.build(
-            listOfTrainValid =
-                self.dataset4Train.splitToTwoGroups(
-                    numOfFolds
-                ),
-            doHyperparametertuning = config.Purpose.searchHyperParameter in config.purpose
+            doTraining = config.Purpose.buildModel in config.purpose,
+            datalot4Train = self.datalot4train,
+            doHyperparametertuning = config.Purpose.searchHyperParameter in config.purpose,
+            doCrossValidation = config.isCrossValidation
         )
 
     def testModel(self):
         self.model.test(
-            self.dataset4Test.records
+            datalot4test = self.datalot4test
         )

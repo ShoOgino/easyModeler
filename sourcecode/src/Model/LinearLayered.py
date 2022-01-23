@@ -1,3 +1,4 @@
+from src.Config.config import config
 import torch
 from torch import nn
 from math import sqrt
@@ -16,18 +17,20 @@ class LinearLayered(nn.Module):
             if(i==0):
                 numOfInput =  self.in_features
             if(0<i):
-                numOfInput =  1 / out_features
+                numOfInput =  out_features
             k = 1 / numOfInput
             weight = torch.empty(out_features, numOfInput).uniform_(-sqrt(k), sqrt(k))
+            weight = weight.to(config.device)
             self.weights.append(nn.Parameter(weight))
 
         # バイアスを格納するベクトルの定義
         for i in range(numOfLayers):
             bias = torch.empty(out_features).uniform_(-k, k)
+            bias = bias.to(config.device)
             self.biases.append(nn.Parameter(bias))
 
     def forward(self, input):
         for i in range(self.numOfLayers):
-            input = torch.nn.functional.linear(input, self.weights[i], self.bias[i])
+            input = torch.nn.functional.linear(input, self.weights[i], self.biases[i])
         return input
 
